@@ -21,6 +21,7 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
+use crate::scene::mesh::Mesh;
 
 pub const BONE_MATRICES_COUNT: usize = 64;
 
@@ -76,6 +77,7 @@ impl BatchStorage {
         &mut self,
         state: &mut PipelineState,
         graph: &Graph,
+        nodes: &Vec<(Handle<Node>, &Mesh)>,
         black_dummy: Rc<RefCell<GpuTexture>>,
         white_dummy: Rc<RefCell<GpuTexture>>,
         normal_dummy: Rc<RefCell<GpuTexture>>,
@@ -90,13 +92,7 @@ impl BatchStorage {
         self.batches.clear();
         self.inner.clear();
 
-        for (handle, mesh) in graph.pair_iter().filter_map(|(handle, node)| {
-            if let Node::Mesh(mesh) = node {
-                Some((handle, mesh))
-            } else {
-                None
-            }
-        }) {
+        for (handle, mesh) in nodes {
             for surface in mesh.surfaces().iter() {
                 let is_skinned = !surface.bones.is_empty();
 
@@ -164,7 +160,7 @@ impl BatchStorage {
                         bone_node.global_transform() * bone_node.inv_bind_pose_transform()
                     })),
                     color: surface.color(),
-                    owner: handle,
+                    owner: *handle,
                     depth_offset: mesh.depth_offset_factor(),
                 });
             }

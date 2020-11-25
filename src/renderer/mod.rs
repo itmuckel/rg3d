@@ -16,7 +16,7 @@ pub mod surface;
 // code must be safe.
 #[macro_use]
 #[allow(unsafe_code)]
-mod framework;
+pub mod framework;
 
 mod batch;
 mod blur;
@@ -30,10 +30,15 @@ mod sprite_renderer;
 mod ssao;
 mod ui_renderer;
 
+use crate::renderer::framework::framebuffer::FrameBuffer;
+use crate::renderer::framework::gpu_program::{GpuProgram, UniformLocation};
+use crate::renderer::framework::query::Query;
+use crate::renderer::framework::state::ColorMask;
 use crate::utils::log::Log;
+use crate::utils::raw_mesh::RawMeshBuilder;
 use crate::{
     core::{
-        algebra::{Matrix4, Vector2, Vector3},
+        algebra::{Matrix4, Vector2, Vector3, Vector4},
         color::Color,
         math::{Rect, TriangleDefinition},
         pool::Handle,
@@ -73,6 +78,7 @@ use crate::{
     scene::{node::Node, Scene, SceneContainer},
 };
 use glutin::PossiblyCurrent;
+use rapier3d::na::Matrix;
 use std::collections::hash_map::Entry;
 use std::{
     cell::RefCell,
@@ -379,6 +385,23 @@ impl Default for Statistics {
     }
 }
 
+pub(in crate) struct QueryShader {
+    program: GpuProgram,
+    wvp_matrix: UniformLocation,
+}
+
+impl QueryShader {
+    fn new() -> Result<Self, RendererError> {
+        let fragment_source = include_str!("shaders/query_fs.glsl");
+        let vertex_source = include_str!("shaders/query_vs.glsl");
+        let program = GpuProgram::from_source("QueryShader", &vertex_source, &fragment_source)?;
+        Ok(Self {
+            wvp_matrix: program.uniform_location("worldViewProjection")?,
+            program,
+        })
+    }
+}
+
 /// See module docs.
 pub struct Renderer {
     state: PipelineState,
@@ -412,6 +435,8 @@ pub struct Renderer {
     texture_cache: TextureCache,
     geometry_cache: GeometryCache,
     batch_storage: BatchStorage,
+    query_shader: QueryShader,
+    bounding_box_surface: SurfaceSharedData
 }
 
 #[derive(Default)]
@@ -750,6 +775,8 @@ impl Renderer {
             geometry_cache: Default::default(),
             state,
             batch_storage: Default::default(),
+            query_shader: QueryShader::new()?,
+            bounding_box_surface: SurfaceSharedData::make_cube(Matrix4::identity()),
         })
     }
 
@@ -874,9 +901,130 @@ impl Renderer {
 
             let state = &mut self.state;
 
+            let all_meshes = graph
+                .pair_iter()
+                .filter_map(|(handle, node)| match &node {
+                    Node::Mesh(mesh) => Some((handle, mesh)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            let mut hidden_counter = 0;
+
+            for camera in graph.linear_iter().filter_map(|node| {
+                if let Node::Camera(camera) = node {
+                    if camera.is_enabled() {
+                        Some(camera)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }) {
+                let mut occlusion_map = scene.occlusion_map.borrow_mut();
+
+                // TODO: update occlusion_map with results from last frame.
+                let occlusion_queries = occlusion_map.entry(camera.original).or_insert(vec![]);
+
+                hidden_counter += occlusion_queries
+                    .iter_mut()
+                    .map(|query| {
+                        query.update_occlusion_result();
+                        query
+                    })
+                    .filter(|query| query.was_occluded())
+                    .count();
+
+                println!("hidden: {}", hidden_counter);
+
+                for &(node, mesh) in &all_meshes {
+                    let aabb = mesh.bounding_box();
+                    let scale = aabb.max - aabb.min;
+
+                    // TODO: very bad runtime
+                    if let Some(query) = occlusion_queries.iter().find(|q| q.node == node) {
+                        query.begin();
+                        self.backbuffer.draw(
+                            self.geometry_cache.get(state, &self.bounding_box_surface),
+                            state,
+                            camera.viewport_pixels(frame_size),
+                            &self.query_shader.program,
+                            &DrawParameters {
+                                cull_face: CullFace::Back,
+                                culling: false,
+                                color_write: ColorMask::all(false),
+                                depth_write: true,
+                                stencil_test: false,
+                                depth_test: true,
+                                blend: false,
+                            },
+                            &[(
+                                self.query_shader.wvp_matrix,
+                                UniformValue::Matrix4(
+                                    camera.view_projection_matrix()
+                                        // * Matrix4::new_nonuniform_scaling(&scale)
+                                        * mesh.global_transform(),
+                                ),
+                            )],
+                        );
+                        query.end();
+                    } else {
+                        let query = Query::new(node);
+                        query.begin();
+                        self.backbuffer.draw(
+                            self.geometry_cache.get(state, &self.bounding_box_surface),
+                            state,
+                            camera.viewport_pixels(frame_size),
+                            &self.query_shader.program,
+                            &DrawParameters {
+                                cull_face: CullFace::Back,
+                                culling: false,
+                                color_write: ColorMask::all(false),
+                                depth_write: true,
+                                stencil_test: false,
+                                depth_test: true,
+                                blend: false,
+                            },
+                            &[(
+                                self.query_shader.wvp_matrix,
+                                UniformValue::Matrix4(
+                                    camera.view_projection_matrix()
+                                        // * Matrix4::new_nonuniform_scaling(&scale)
+                                        * mesh.global_transform(),
+                                ),
+                            )],
+                        );
+                        query.end();
+                        occlusion_queries.push(query);
+                    }
+                }
+            }
+
+            let meshes_to_render = all_meshes
+                .into_iter()
+                .filter(|(node, _)| {
+                    scene
+                        .occlusion_map
+                        .borrow_mut()
+                        .values()
+                        .flatten()
+                        .any(|q| q.node == *node && !q.was_occluded())
+                })
+                .collect::<Vec<_>>();
+
+            self.backbuffer.clear(
+                state,
+                window_viewport,
+                Some(self.backbuffer_clear_color),
+                Some(1.0),
+                Some(0),
+            );
+
             self.batch_storage.generate_batches(
                 state,
                 graph,
+                &meshes_to_render,
                 self.black_dummy.clone(),
                 self.white_dummy.clone(),
                 self.normal_dummy.clone(),

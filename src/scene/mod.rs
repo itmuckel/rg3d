@@ -15,6 +15,7 @@ pub mod physics;
 pub mod sprite;
 pub mod transform;
 
+use crate::renderer::framework::query::Query;
 use crate::{
     animation::AnimationContainer,
     core::{
@@ -30,6 +31,7 @@ use crate::{
     utils::{lightmap::Lightmap, log::Log},
 };
 use rapier3d::na::Point3;
+use std::cell::RefCell;
 use std::{
     collections::HashMap,
     ops::{Index, IndexMut},
@@ -191,7 +193,7 @@ impl Visit for PhysicsBinder {
 pub struct Line {
     /// Beginning of the line.
     pub begin: Vector3<f32>,
-    /// End of the line.    
+    /// End of the line.
     pub end: Vector3<f32>,
     /// Color of the line.
     pub color: Color,
@@ -565,6 +567,8 @@ pub struct Scene {
     pub drawing_context: SceneDrawingContext,
 
     lightmap: Option<Lightmap>,
+
+    pub occlusion_map: RefCell<HashMap<Handle<Node>, Vec<Query>>>,
 }
 
 impl Default for Scene {
@@ -577,6 +581,7 @@ impl Default for Scene {
             render_target: None,
             lightmap: None,
             drawing_context: Default::default(),
+            occlusion_map: RefCell::new(HashMap::default()),
         }
     }
 }
@@ -602,12 +607,13 @@ impl Scene {
         Self {
             // Graph must be created with `new` method because it differs from `default`
             graph: Graph::new(),
-            physics: Default::default(),
             animations: Default::default(),
+            physics: Default::default(),
             physics_binder: Default::default(),
             render_target: None,
             lightmap: None,
             drawing_context: Default::default(),
+            occlusion_map: RefCell::new(HashMap::default()),
         }
     }
 
@@ -886,6 +892,7 @@ impl Scene {
                 render_target: Default::default(),
                 lightmap: self.lightmap.clone(),
                 drawing_context: self.drawing_context.clone(),
+                occlusion_map: RefCell::new(self.occlusion_map.borrow_mut().clone()),
             },
             old_new_map,
         )
@@ -939,6 +946,7 @@ impl SceneContainer {
 
     /// Removes all scenes from container.
     #[inline]
+
     pub fn clear(&mut self) {
         self.pool.clear()
     }

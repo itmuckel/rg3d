@@ -18,6 +18,7 @@ pub mod geometry_buffer;
 pub mod gpu_program;
 pub mod gpu_texture;
 pub mod state;
+pub mod query;
 
 pub fn check_gl_error_internal(line: u32, file: &str) {
     unsafe {
